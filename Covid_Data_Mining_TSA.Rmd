@@ -1,0 +1,442 @@
+---
+title: "Covid_Data_Mining_TSA"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+**Introduction**
+
+The metadata is obtained from https://www.gisaid.org/. Population datasets are obtained from https://www.census.gov. Confirmed cases data is obtained from https://dshs.texas.gov/coronavirus/AdditionalData.aspx. 
+
+```{r}
+
+library(tidyverse)
+library(dplyr)
+library(stringi)
+library(ggplot2)
+library(ggforce)
+library(colorspace)
+library(scatterpie)
+library(sf)
+
+metadata <- read.delim(file = '/stor/work/FRI-BigDataBio/covid_data_mining/metadata.tsv')
+
+TSA <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/TSA.csv')
+
+TSA_pop <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/TSA_population.csv')
+
+metadata <- metadata %>% filter(str_detect(Location, 'Texas')) %>% 
+  separate(Location, into = c('region', 'country', 'state', 'location'), 
+           sep = ' / ') %>% filter(location != "")
+
+metadata$location = tolower(metadata$location)
+
+metadata$location = stri_trans_totitle(metadata$location)
+
+houston <- metadata %>% filter(location == 'Houston County')
+
+houston_id <- as.character(houston$Accession.ID)
+
+metadata <- metadata %>% mutate_at('location', str_remove_all, ' County') %>% 
+  mutate_at("location", str_replace, "Atacosta", "Atascosa") %>% 
+  mutate_at("location", str_replace, "Dekalb", "De Kalb") %>% 
+  mutate_at("location", str_replace, "Fortbend", "Fort Bend") %>% 
+  mutate_at("location", str_replace, "Moris", "Morris") %>% 
+  mutate_at("location", str_replace, "Tomgreen", "Tom Green") %>% 
+  mutate_at("location", str_replace, "Vanzandt", "Van Zandt") %>% 
+  mutate_at('location', str_replace, 'Mclennan', 'McLennan') %>% 
+  mutate_at('location', str_replace, 'Little River Academy', 
+            'Little River-Academy') %>% 
+  mutate_at('location', str_replace, 'Harros', 'Harris')
+
+TSA <- TSA %>% rename(location = County)
+
+metadata_1 <- metadata %>% left_join(TSA) %>% filter(!is.na(TSA))
+
+metadata_2 <- metadata %>% left_join(TSA) %>% filter(is.na(TSA)) %>% 
+  select(-TSA)
+
+population_city <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/Population_by_city_2019.csv')
+
+population_city <- population_city %>% select(Location, Main_County) %>% 
+  rename(location = Location, county = Main_County)
+
+TSA <- TSA %>% rename(county = location)
+
+metadata_2 <- metadata_2 %>% left_join(population_city, by = 'location')
+
+metadata_2$county[metadata_2$location == 'Kingsland'] = 'Llano'
+
+metadata_2$county[metadata_2$location == 'Lafayette'] = 'Upshur'
+
+metadata_2$county[metadata_2$location == 'Walton'] = 'Van Zandt'
+
+metadata_2$county[metadata_2$location == 'Spring'] = 'Harris'
+
+metadata_2$county[metadata_2$location == 'The Woodlands'] = 'Montgomery'
+
+metadata_2$county[metadata_2$location == 'Briggs'] = 'Burnet'
+
+metadata_2$county[metadata_2$location == 'Axtell'] = 'McLennan'
+
+metadata_2$county[metadata_2$location == 'Roosevelt'] = 'Kimble'
+
+metadata_2 <- metadata_2 %>% left_join(TSA, by = 'county')
+
+metadata_2 <- metadata_2 %>% filter(!is.na(TSA)) %>% select(-county)
+
+metadata <- rbind(metadata_1, metadata_2)
+
+metadata$TSA[metadata$location == 'Houston'] = 'TSA Q'
+
+metadata$TSA[metadata$Accession.ID %in% houston_id] = 'TSA G'
+
+```
+
+```{r}
+US_counties <- readRDS(url("https://wilkelab.org/SDS375/datasets/US_counties.rds")) %>% rename(FIPS = GEOID)
+st_crs(US_counties) <- NA
+US_census <- read_csv( "https://wilkelab.org/SDS375/datasets/US_census.csv", col_types = cols(FIPS = "c"))
+US_census <- US_census %>% select(-name)
+US_full <- left_join(US_counties, US_census, by = 'FIPS')
+
+TX <- US_full %>% filter(state %in% 'Texas') %>% select(NAME, state, geometry)
+TX <- TX %>% rename(county = NAME)
+TX <- left_join(TX, TSA)
+TX$TSA[TX$county == 'McCulloch'] = 'TSA K'
+TX$TSA[TX$county == 'DeWitt'] = 'TSA S'
+TX$TSA[TX$county == 'McMullen'] = 'TSA U'
+
+```
+
+**Q1**: Where are samples being collected, and how does that compare with where they are being sequenced? For example, are there areas of the state that are over or under sampled?
+
+```{r}
+
+total = nrow(metadata)
+
+metadata_case <- metadata %>% dplyr::count(TSA) %>% left_join(TSA_pop)
+
+metadata_case <- metadata_case %>% 
+  mutate('number of sample per 1000 people' = n / (population/1000))
+
+metadata_case <- metadata_case %>% mutate('% of collected samples' = n / total * 100)
+
+metadata_case %>% 
+  arrange(desc(`number of sample per 1000 people`)) %>% top_n(5)
+
+metadata_case %>% 
+  arrange(desc(`number of sample per 1000 people`)) %>% top_n(-5)
+
+metadata_case %>% 
+  arrange(desc(`% of collected samples`)) %>% top_n(5)
+
+metadata_case %>% 
+  arrange(desc(`% of collected samples`)) %>% top_n(-5)
+
+```
+
+The TSA is where the samples were sequenced. 
+
+```{r}
+
+TX <- left_join(TX, metadata_case)
+TX <- TX %>% rename(number_of_sample_per_1000_people = 'number of sample per 1000 people')
+
+TX <- TX %>% mutate(log_number = log(number_of_sample_per_1000_people))
+
+TX %>% ggplot() + 
+  geom_sf(aes(fill = log_number)) + 
+  scale_fill_continuous_sequential(palette = "YlOrRd", 
+                                   name = 
+                                     'log(number \nof sample \nper 1000\npeople)') +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = 'Number of COVID Samples Submitted by TSA')
+
+```
+
+
+**Q2**: How many cases are collected each month?
+
+```{r}
+
+new_cases <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/cases_by_TSA.csv')
+
+metadata_collect <- metadata %>% 
+  separate(Collection.date, into = c('year', 'month', 'date'), sep = '-') %>% 
+  separate(Submission.date, into = c('year_sub', 'month_sub', 'date_sub'),
+                                    sep = '-')
+
+collect_plot <- metadata_collect %>% group_by(year) %>% dplyr::count(month)
+
+collect_plot$year_and_month = str_c(collect_plot$year, '.', collect_plot$month)
+
+collect_plot <- collect_plot %>% filter(!is.na(year_and_month))
+
+collect_plot %>% select(-year_and_month)
+
+submit_plot <- metadata_collect %>% group_by(year_sub) %>% 
+  dplyr::count(month_sub) %>% filter(year_sub != 'undefined')
+
+submit_plot$year_and_month = str_c(submit_plot$year_sub, '.', 
+                                   submit_plot$month_sub)
+
+submit_plot %>% select(-year_and_month)
+
+ggplot(submit_plot, aes(x = year_and_month, y = n, group = 1, 
+                        color = 'black')) + geom_point() +
+  labs(x = 'Month', y = 'Cases') + theme_minimal() + geom_line() +
+  scale_x_discrete(guide = guide_axis(n.dodge=2)) + 
+  ggtitle('Number of Samples Collected / Submitted per Month') +
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  geom_point(data = collect_plot, aes(x = year_and_month, y = n, 
+                                      color = 'red')) +
+  geom_line(data = collect_plot, aes(x = year_and_month, y = n, group = 1, 
+                                     color = 'red')) +
+  scale_color_manual(labels = c("submitted", "collected"), 
+                     values = c("red", "black"), name = NULL)
+
+
+metadata$diff_days <- as.numeric(
+  as.Date(as.character(metadata$Submission.date), format="%Y-%m-%d")-
+    as.Date(as.character(metadata$Collection.date), format="%Y-%m-%d")
+)
+
+temp <- metadata %>% select(Accession.ID, diff_days)
+
+metadata_collect <- metadata_collect %>% left_join(temp, by = 'Accession.ID')
+
+new_cases <- new_cases %>% 
+  pivot_longer(cols = everything(), names_to = 'time', values_to = 'cases') %>% 
+  separate(time, into = c('year', 'month', 'date')) %>% 
+  mutate_at('year', str_remove_all, 'X')
+
+new_cases <- new_cases %>% group_by(year, month) %>% summarize(n = sum(cases))
+
+new_cases$year_and_month = str_c(new_cases$year, '.', new_cases$month)
+
+ggplot(new_cases, aes(x = year_and_month, y = n, group = 1)) + geom_point() +
+  labs(x = 'Month', y = 'Cases') + theme_minimal() + geom_line() +
+  scale_x_discrete(guide = guide_axis(n.dodge=2)) + 
+  ggtitle('Number of Samples Confirmed per Month') +
+  theme(plot.title = element_text(hjust = 0.5))
+
+collected <- collect_plot %>% select(-year_and_month)
+
+proportion_plot <- new_cases %>% 
+  left_join(collected, by = c("year", "month")) %>% 
+  rename(confirmed = n.x, collected = n.y)
+
+proportion_plot <- proportion_plot %>% 
+  mutate(ratio = collected / confirmed * 100)
+
+proportion_plot <- proportion_plot %>% filter(!is.na(ratio))
+
+ggplot(proportion_plot, aes(x = year_and_month, y = ratio, group = 1)) + 
+  geom_point() +
+  labs(x = 'Month', y = 'Proportion (%)') + theme_minimal() + geom_line() +
+  scale_x_discrete(guide = guide_axis(n.dodge=2)) + 
+  ggtitle('Number of Samples Collected / Confirmed per Month') +
+  theme(plot.title = element_text(hjust = 0.5))
+
+lag <- metadata_collect %>% group_by(year, month) %>% 
+  summarise(mean = mean(diff_days))
+
+lag$year_and_month = str_c(lag$year, '.', lag$month)
+
+lag <- lag %>% filter(!is.na(month))
+
+ggplot(lag, aes(x = year_and_month, y = mean, group = 1)) + geom_point() +
+  labs(x = 'Month', y = 'Mean Lag Time (days)') + theme_minimal() + geom_line() +
+  scale_x_discrete(guide = guide_axis(n.dodge=2)) + 
+  ggtitle('Lag Time between Collection and Submission per Month') +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+**Q3**: What regions in Texas appear to have the highest genetic diversity?
+
+```{r}
+
+variant_num <- length(unique(metadata$Pango.lineage))
+
+metadata_variants <- metadata %>% group_by(TSA) %>% 
+  summarise(number = length(unique(Pango.lineage))) %>% 
+  arrange(desc(number)) %>% left_join(TSA_pop)
+
+metadata_variants <- metadata_variants %>% 
+  mutate('number_of_variants_per_1000_people' = number / (population/1000)) %>% 
+  arrange(desc(number_of_variants_per_1000_people))
+
+metadata_variants %>% 
+  mutate('% of total variants' = number / variant_num * 100) %>% 
+  arrange(desc(number))
+
+```
+
+```{r}
+TX <- TX %>% left_join(metadata_variants %>% select(TSA, number_of_variants_per_1000_people))
+
+TX %>% ggplot() + 
+  geom_sf(aes(fill = number_of_variants_per_1000_people)) + 
+  scale_fill_continuous_sequential(palette = "YlOrRd", 
+                                   name = 
+                                     'number\nof variants\nper\n1000\npeople') +
+  theme_void()
+
+```
+
+
+**Q4**: What is the variant prevalence across the state for major variants?
+
+```{r}
+
+VOI <- c('B.1.427', 'B.1.429', 'B.1.525', 'B.1.526', 'B.1.617.1', 'B.1.617.3', 
+         'P.2')
+
+VOC <- c('B.1.1.7', 'B.1.351', 'B.1.617.2', 'P.1')
+
+VOI_VOC <- c('B.1.427', 'B.1.429', 'B.1.525', 'B.1.526', 'B.1.617.1', 
+             'B.1.617.3', 'P.2', 'B.1.1.7', 'B.1.351', 'B.1.617.2', 'P.1')
+
+new_metadata <- metadata
+
+new_metadata <- new_metadata %>% mutate(pango.lineage = case_when(
+  Pango.lineage %in% VOI_VOC ~ as.character(Pango.lineage),
+  Pango.lineage == 'B.1.526.1' ~ 'B.1.526',
+  Pango.lineage == 'B.1.526.2' ~ 'B.1.526',
+  Pango.lineage == 'P.1.1' ~ 'P.1',
+  Pango.lineage == 'B.1.427/429' ~ 'B.1.427',
+  Pango.lineage == 'B.1.1' ~ 'B.1.1*',
+  Pango.lineage == 'B.1.2' ~ 'B.1.2*',
+  Pango.lineage == 'B.1.596' ~ 'B.1.596*',
+  Pango.lineage == 'B.1.574' ~ 'B.1.574*',
+  Pango.lineage == 'B.1.576' ~ 'B.1.576*',
+  Pango.lineage == 'B.1' ~ 'B.1*',
+  Pango.lineage == 'B.1.427/429' ~ 'B.1.427',
+  Pango.lineage == 'B.1.369' ~ 'B.1.369*',
+  Pango.lineage == 'B.1.355' ~ 'B.1.355*',
+  Pango.lineage == 'B.1.595' ~ 'B.1.595*',
+  Pango.lineage == 'B.1.206' ~ 'B.1.206*',
+  Pango.lineage == 'B.1.305' ~ 'B.1.305*',
+  Pango.lineage == 'B.1.396' ~ 'B.1.396*',
+  TRUE ~ 'other'))
+
+metadata_VOI_VOC <- new_metadata %>% 
+  filter(pango.lineage %in% VOI_VOC) %>% group_by(TSA) %>% 
+  dplyr::count(pango.lineage)
+
+metadata_VOI_VOC
+
+ggplot(metadata_VOI_VOC) + aes(x0 = 0, y0 = 0, r0 = 0, r = 1, amount = n, 
+                                  fill = pango.lineage) +
+  geom_arc_bar(stat = "pie") + facet_wrap(~TSA, ncol = 6) + 
+  coord_fixed() +
+  scale_fill_discrete_qualitative(palette = "Set 3", name = 'Pango lineage') +
+  theme_void() + ggtitle('VOI & VOC Distribution') +
+  theme(plot.title = element_text(hjust = 0.5))
+
+metadata_other <- new_metadata %>% group_by(TSA) %>% dplyr::count(pango.lineage)
+
+metadata_other
+
+ggplot(metadata_other) + aes(x0 = 0, y0 = 0, r0 = 0, r = 1, amount = n, 
+                                  fill = pango.lineage) +
+  geom_arc_bar(stat = "pie") + facet_wrap(~TSA, ncol = 6) + 
+  coord_fixed() +
+  scale_fill_discrete_qualitative(palette = "Set 3", name = 'Pango lineage') +
+  theme_void() + ggtitle('VOI & VOC vs. Others') +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+* means it is not VOI/VOC. These variants are considered here because of their prevalence. 
+
+```{r}
+
+coordinates_TSA <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/coordinates_TSA.csv')
+
+state <- map_data('state')
+
+texas <- state %>% filter(region == 'texas')
+
+counties <- map_data("county")
+
+tx_county <- subset(counties, region == "texas")
+
+tx_base <- ggplot(TX_geo) + geom_sf(fill='white')
+
+map_VOI_VOC <- metadata_VOI_VOC %>% left_join(coordinates_TSA)
+
+map_VOI_VOC <- map_VOI_VOC %>% pivot_wider(names_from="pango.lineage", values_from="n")
+
+map_VOI_VOC[is.na(map_VOI_VOC)] <- 0
+
+tx_base + 
+  geom_scatterpie(data = map_VOI_VOC, aes(x=Lon, y=Lat, group=TSA), 
+                  cols=colnames(map_VOI_VOC)[4:13], color=NA, alpha=.8,
+                  pie_scale = 2) + 
+  guides(fill=guide_legend(title="Variant")) +
+  ggtitle('VOI & VOC Distribution by TSA') +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+map_other <- metadata_other %>% left_join(coordinates_TSA)
+
+map_other <- map_other %>% pivot_wider(names_from="pango.lineage", values_from="n")
+
+map_other[is.na(map_other)] <- 0
+
+tx_base + 
+  geom_scatterpie(data = map_other, aes(x=Lon, y=Lat, group=TSA), 
+                  cols=colnames(map_other)[4:22], color=NA, alpha=.9,
+                  pie_scale = 2) + 
+  guides(fill=guide_legend(title="Variant")) +
+  ggtitle('VOI & VOC vs. Others Distribution by TSA') +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+**Q5**: Hypergeometric Test: Which variants are over enriched in each TSA?
+
+```{r}
+
+# function to calculate the p-value
+
+hypergeom <- function(k, s, M, N) {
+  expected <- s*M/N
+  ifelse(k >= expected, phyper(k-1, M, N-M, s, lower.tail = FALSE), 
+         phyper(k, M, N-M, s))
+}
+
+```
+
+```{r}
+
+k <- nrow(new_metadata)
+
+variant_number <- new_metadata %>% dplyr::count(pango.lineage) %>% 
+  filter(pango.lineage != 'other')
+
+sample_number <- new_metadata %>% dplyr::count(TSA)
+
+hypergeo <- metadata_VOI_VOC %>% left_join(sample_number, by = 'TSA') %>% 
+  rename(x = n.x, n = n.y)
+
+hypergeo <- left_join(hypergeo, variant_number, by = 'pango.lineage') %>% 
+  rename(n = n.x, m = n.y)
+
+hypergeo$p.value = hypergeom(hypergeo$x, hypergeo$n, hypergeo$m, k)
+
+hypergeo$sig = ifelse(hypergeo$p.value < 0.05, 'Yes', 'No')
+
+hypergeo$expected = hypergeo$n * hypergeo$m / k
+
+hypergeo$enriched = ifelse(hypergeo$x > hypergeo$expected, 'over', 'under')
+
+hypergeo %>% filter(sig == 'Yes', enriched == 'over') %>% arrange(p.value)
+
+```

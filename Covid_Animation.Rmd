@@ -1,0 +1,234 @@
+---
+title: "Covid Animation"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(dplyr)
+library(stringi)
+library(stringr)
+library(ggplot2)
+library(ggforce)
+library(colorspace)
+library(scatterpie)
+library(sf)
+library(gganimate)
+```
+
+```{r}
+US_counties <- readRDS(url("https://wilkelab.org/SDS375/datasets/US_counties.rds")) %>% rename(FIPS = GEOID)
+st_crs(US_counties) <- NA
+US_census <- read_csv( "https://wilkelab.org/SDS375/datasets/US_census.csv", col_types = cols(FIPS = "c"))
+US_census <- US_census %>% select(-name)
+US_full <- left_join(US_counties, US_census, by = 'FIPS')
+
+TX <- US_full %>% filter(state %in% 'Texas') %>% select(NAME, state, geometry)
+TX <- TX %>% rename(county = NAME)
+TX <- left_join(TX, TSA)
+TX$TSA[TX$county == 'McCulloch'] = 'TSA K'
+TX$TSA[TX$county == 'DeWitt'] = 'TSA S'
+TX$TSA[TX$county == 'McMullen'] = 'TSA U'
+
+TX_path <- TX %>% select(TSA, geometry)
+```
+
+```{r}
+#old_data <- read.delim('/stor/work/FRI-BigDataBio/covid_data_mining/gisaid_data/TX/all.TX.to_2021_09_29.patient_status.tsv')
+
+data <- read.delim('/stor/work/FRI-BigDataBio/covid_data_mining/gisaid_data/TX/all.to_2022_02_07.TX.metadata.tsv')
+
+TSA <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/TSA.csv')
+
+TSA_pop <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/TSA_population.csv')
+
+variants <- c('B.1.1.7', 'B.1.427', 'B.1.617.2')
+
+data <- data %>% filter(str_detect(division, 'Texas')) %>% 
+  filter((date != '2020') & (date != '2021') & (date != '2022')) %>% 
+  filter(location != "") %>% 
+  mutate(month = substr(date, 1, 7))
+
+data$location = tolower(data$location)
+
+data$location = stri_trans_totitle(data$location)
+
+houston <- data %>% filter(location == 'Houston County')
+
+houston_id <- as.character(houston$Accession.ID)
+
+data <- data %>% mutate_at('location', str_remove_all, ' County') %>% 
+  mutate_at("location", str_replace, "Atacosta", "Atascosa") %>% 
+  mutate_at("location", str_replace, "Dekalb", "De Kalb") %>% 
+  mutate_at("location", str_replace, "Fortbend", "Fort Bend") %>% 
+  mutate_at("location", str_replace, "Moris", "Morris") %>% 
+  mutate_at("location", str_replace, "Tomgreen", "Tom Green") %>% 
+  mutate_at("location", str_replace, "Vanzandt", "Van Zandt") %>% 
+  mutate_at('location', str_replace, 'Mclennan', 'McLennan') %>% 
+  mutate_at('location', str_replace, 'Little River Academy', 
+            'Little River-Academy') %>% 
+  mutate_at('location', str_replace, 'Harros', 'Harris')
+
+TSA <- TSA %>% rename(location = County)
+
+data_1 <- data %>% left_join(TSA) %>% filter(!is.na(TSA))
+
+data_2 <- data %>% left_join(TSA) %>% filter(is.na(TSA)) %>% 
+  select(-TSA)
+
+population_city <- read.csv('/stor/work/FRI-BigDataBio/covid_data_mining/Population_by_city_2019.csv')
+
+population_city <- population_city %>% select(Location, Main_County) %>% 
+  rename(location = Location, county = Main_County)
+
+TSA <- TSA %>% rename(county = location)
+
+data_2 <- data_2 %>% left_join(population_city, by = 'location')
+
+data_2$county[data_2$location == 'Kingsland'] = 'Llano'
+
+data_2$county[data_2$location == 'Lafayette'] = 'Upshur'
+
+data_2$county[data_2$location == 'Walton'] = 'Van Zandt'
+
+data_2$county[data_2$location == 'Spring'] = 'Harris'
+
+data_2$county[data_2$location == 'The Woodlands'] = 'Montgomery'
+
+data_2$county[data_2$location == 'Briggs'] = 'Burnet'
+
+data_2$county[data_2$location == 'Axtell'] = 'McLennan'
+
+data_2$county[data_2$location == 'Roosevelt'] = 'Kimble'
+
+data_2 <- data_2 %>% left_join(TSA, by = 'county')
+
+data_2 <- data_2 %>% filter(!is.na(TSA)) %>% select(-county)
+
+data <- rbind(data_1, data_2)
+
+data$TSA[data$location == 'Houston'] = 'TSA Q'
+
+data$TSA[data$Accession.ID %in% houston_id] = 'TSA G'
+
+data <- data %>% mutate(variant = case_when(
+  pango_lineage %in% variants ~ as.character(pango_lineage),
+  pango_lineage == 'B.1.429' ~ 'B.1.427',
+  TRUE ~ 'other'))
+
+data_list <- split(data, f = data$month)
+```
+
+```{r}
+formatting <- function(dataframe, variant_name) {
+  result <- TX_path %>% left_join(dataframe %>% group_by(TSA) %>% 
+                                    dplyr::count(variant) %>% 
+                                    filter(variant == variant_name))
+  
+  result$variant[is.na(result$variant)] <- 'other'
+
+  result$n[is.na(result$n)] <- 0
+
+  result$month = dataframe$month[1]
+  
+  return(result)
+}
+```
+
+```{r}
+# B.1.1.7
+
+data_list_alpha <- split(data, f = data$month)
+
+data_list_alpha <- lapply(data_list_alpha, formatting, 'B.1.1.7')
+
+animation_alpha <- bind_rows(data_list_alpha)
+
+animation_alpha <- animation_alpha %>% 
+  mutate(log_n = case_when(n != 0 ~ log(n), TRUE ~ 0))
+
+animation_alpha <- animation_alpha %>% filter((month > '2020-11') & 
+                                                (month < '2021-11'))
+
+alpha_distribution <- animation_alpha %>% 
+  ggplot() + geom_sf(aes(fill = log_n)) +
+  scale_fill_gradient(name = 'log(number\nof cases)', 
+                      low = 'white', high = 'red') +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = 'Alpha Variant Distribution in {closest_state}') +
+  transition_states(month) +
+  ease_aes('linear') + theme(plot.background=element_rect(fill="black"),
+                             axis.title.x = element_text(colour = "white"),
+                             axis.title.y = element_text(colour = "white"),
+                             plot.title = element_text(color = "white",
+                                                       size = 20),
+                             legend.title = element_text(color = "white"))
+
+animate(alpha_distribution, fps=5)
+  
+```
+
+```{r}
+# B.1.427 & B.1.429
+
+data_list_epsilon <- split(data, f = data$month)
+
+data_list_epsilon <- lapply(data_list_epsilon, formatting, 'B.1.427')
+
+animation_epsilon <- bind_rows(data_list_epsilon)
+
+animation_epsilon <- animation_epsilon %>% 
+  mutate(log_n = case_when(n != 0 ~ log(n), TRUE ~ 0))
+
+epsilon_distribution <- animation_epsilon %>% 
+  ggplot() + geom_sf(aes(fill = log_n)) +
+  scale_fill_gradient(name = 'log(number\nof cases)', 
+                      low = 'white', high = 'green') +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = 'Epsilon Variant Distribution in {closest_state}') +
+  transition_states(month) +
+  ease_aes('linear')
+
+animate(epsilon_distribution, fps=4)
+```
+
+```{r}
+# B.1.617.2
+
+data_list_delta <- split(data, f = data$month)
+
+data_list_delta <- lapply(data_list_delta, formatting, 'B.1.617.2')
+
+animation_delta <- bind_rows(data_list_delta)
+
+animation_delta <- animation_delta %>% 
+  mutate(log_n = case_when(n != 0 ~ log(n), TRUE ~ 0))
+
+animation_delta <- animation_delta %>% filter((month > '2021-02') & (month < '2022-01'))
+
+delta_distribution <- animation_delta %>% 
+  ggplot() + geom_sf(aes(fill = log_n)) +
+  scale_fill_gradient(name = 'log(number\nof cases)', 
+                      low = 'white', high = 'blue') +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  labs(title = 'Delta Variant Distribution in {closest_state}') +
+  transition_states(month) +
+  ease_aes('linear') + theme(plot.background=element_rect(fill="black"),
+                             axis.title.x = element_text(colour = "white"),
+                             axis.title.y = element_text(colour = "white"),
+                             plot.title = element_text(color = "white",
+                                                       size = 20),
+                             legend.title = element_text(color = "white"))
+
+animate(delta_distribution, fps=5)
+```
+
